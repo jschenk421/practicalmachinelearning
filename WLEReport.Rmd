@@ -1,0 +1,169 @@
+---
+title: "Predicting exercise results"
+author: "Jan Schenk"
+date: "February 6, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+options(scipen = 999)
+
+if (!require(here)) install.packages("here")
+source(file.path(here::here(), "R", "util.R"))
+```
+
+# Introduction
+This is an attempt to see if it is possible to predict the results of a weightlifting exercise based on lots of sensor data. Data has been kindly provided to us by Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. (Read more: http://groupware.les.inf.puc-rio.br/har#ixzz56JhTvf6B). There is also more information on the data and the research they did.
+
+In our research we will try to build a model that is able to predict the exercise results for 20 exercises.
+
+The data is in two files:
+
+**R001: pml-training.csv**<br>
+A datafile containing sensor values and the results for 19622 exercises by 6 different persons.<br>
+
+**R002: pml-test.csv**<br>
+A datafile containing sensor values for 20 exercises by 6 different persons.<br>
+
+# Raw data
+```{r dataload}
+
+  dfR001 <- read.csv(file.path(paths$data, "raw", "R001", "pml-training.csv"), fileEncoding = "UTF-8")
+  names(dfR001) <- make.names(names(dfR001), unique=TRUE)
+
+  dfR002 <- read.csv(file.path(paths$data, "raw", "R002", "pml-testing.csv"), fileEncoding = "UTF-8")
+  names(dfR002) <- make.names(names(dfR002), unique=TRUE)
+
+  writeLines("Dimensions of the training set:")
+  print(dim(dfR001))
+  
+  writeLines("Dimensions of the testing set:")
+  print(dim(dfR002))
+```
+
+# Exploration
+## Missing data
+So there are a lot of predictors to choose from. Let's have a look at the missing values in the training set.
+
+```{r showmissingdata}
+  missmap(dfR002, col=c("darkblue", "lightblue"), legend=FALSE)
+```
+
+We see that about **60** percent of the columns has no data. These columns can be skipped from the training set and and the testing set. There is also the column **problem_id** that is not present in the testing set. That must also be skipped. We will look for all columns that have more than **10** percent missing and delete them.
+
+```{r skipmissing}
+t <- dfR002 %>% 
+  map(~ mean(is.na(.)))
+
+
+# Select the columns that have at most 10 percent NA
+to_select <- names(t[which(t < 0.1)])
+# Remove problem_id, keep classe
+to_select <- to_select[!to_select %in% 'problem_id']
+to_select <- append(to_select,'classe')
+
+dfR001 <- dfR001 %>% 
+  dplyr::select(to_select) %>% 
+  filter(complete.cases(.))
+
+# There is no classe in test
+to_select <- to_select[!to_select %in% 'classe']
+
+dfR002 <- dfR002 %>% 
+  dplyr::select(to_select) %>% 
+  filter(complete.cases(.))
+
+```
+
+## Other data to remove
+Now let's zoom in on the data.
+
+```{r datazoom}
+ print(head(dfR001, n=2))
+
+ print(head(dfR002, n=2))
+```
+
+There are still some columns that can be skipped because they do not contain sensor data. What also can be seen that the field **new_window** has some odd rows in the training set when value is **'yes'** where in the testing set the value is always **'no'**. So let's first get rid of those rows and then get rid of the column.
+
+## Formatting the data
+We will also **hot encode** the data and **normalize** it.
+
+```{r removeadditionalcolumns}
+  # Remove mentioned columns and rows
+  dfR001 <- dfR001[dfR001$new_window!="yes",]
+
+  to_select <- names(dfR001)
+  to_select <- to_select[!to_select %in% 'new_window']
+  to_select <- to_select[!to_select %in% 'raw_timestamp_part_1']
+  to_select <- to_select[!to_select %in% 'raw_timestamp_part_2']
+  to_select <- to_select[!to_select %in% 'cvtd_timestamp']
+  to_select <- to_select[!to_select %in% 'num_window']
+  to_select <- to_select[!to_select %in% 'X']
+ 
+  dfR001 <- dfR001 %>% dplyr::select(to_select)
+
+  to_select <- names(dfR002)
+  to_select <- to_select[!to_select %in% 'new_window']
+  to_select <- to_select[!to_select %in% 'raw_timestamp_part_1']
+  to_select <- to_select[!to_select %in% 'raw_timestamp_part_2']
+  to_select <- to_select[!to_select %in% 'cvtd_timestamp']
+  to_select <- to_select[!to_select %in% 'num_window']
+  to_select <- to_select[!to_select %in% 'X']
+ 
+  dfR002 <- dfR002 %>% dplyr::select(to_select)
+  
+  # Split target var from training set
+  y <- dfR001$classe
+  
+  to_select <- names(dfR001)
+  to_select <- to_select[!to_select %in% 'classe']
+
+  dfR001 <- dfR001 %>% dplyr::select(to_select)
+  
+  dfTotal <- rbind(dfR001, dfR002)
+
+  # One hot encode
+  dmy <- dummyVars(" ~ .", data = dfTotal,fullRank = T)
+  dfTotal <- data.frame(predict(dmy, newdata = dfTotal))
+
+  # Normalize
+  # calculate the pre-process parameters from the dataset
+  preprocessParams <- preProcess(dfTotal, method=c("range"))
+  # summarize transform parameters
+  print(preprocessParams)
+  # transform the dataset using the parameters
+  dfTotal <- predict(preprocessParams, dfTotal)
+
+  
+  dfTrain <- dfTotal[1:19216,]
+  dfTest  <- dfTotal[19217:19236,]
+
+  dfTrain <- cbind(dfTrain,y)
+  dfTrain <- rename(dfTrain, classe=y)
+
+
+```
+
+# Run an algorithm
+In these situations **Random Forest** usually yields good results. So let's try that **with cross validation** to prevent overfitting.
+
+```{r randomforest }
+  # define training control
+  tc <- trainControl(method="cv", number=5, verbose=FALSE)
+  
+  # evaluate the model
+  myfit <- train(classe~., data=dfTrain, trControl=tc, method="rf")
+ 
+  # display the results
+  print(myfit)
+  
+  predictions <- predict(myfit, dfTest)
+
+  print(predictions)
+```
+
+It turned out that these are **all correct**.
+
